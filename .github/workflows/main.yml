@@ -24,7 +24,7 @@ jobs:
           CI: false
 
       - name: 🔨 Build Web App
-        run: npx expo export --platform web --output-dir dist
+        run: npm run build:web
         env:
           CI: false
           EXPO_NO_TELEMETRY: 1
