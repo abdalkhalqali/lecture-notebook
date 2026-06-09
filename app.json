@@ -2,6 +2,7 @@
   "expo": {
     "name": "دفتر المحاضرات",
     "slug": "lecture-notebook",
+    "owner": "abdalkhalqali",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
