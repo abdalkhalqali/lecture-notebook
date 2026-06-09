@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-notify:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,38 +23,65 @@ jobs:
         env:
           CI: false
 
-      - name: 🔨 Build Web App
+      # ─────────── نسخة الويب ───────────
+      - name: 🌐 Build Web
         run: npm run build:web
         env:
           CI: false
           EXPO_NO_TELEMETRY: 1
 
-      - name: 🗜️ Create ZIP
+      - name: 🗜️ Zip Web
         run: |
-          zip -r lecture-notebook.zip dist/
-          echo "ZIP_SIZE=$(du -h lecture-notebook.zip | cut -f1)" >> $GITHUB_ENV
+          zip -r lecture-notebook-web.zip dist/
+          echo "WEB_SIZE=$(du -h lecture-notebook-web.zip | cut -f1)" >> $GITHUB_ENV
           echo "COMMIT=$(git log --oneline -1 | cut -c1-60)" >> $GITHUB_ENV
           echo "BUILD_TIME=$(date '+%Y-%m-%d %H:%M')" >> $GITHUB_ENV
 
-      - name: 📣 Notify Telegram
-        env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{\"chat_id\":\"${CHAT_ID}\",\"parse_mode\":\"HTML\",\"text\":\"✅ <b>دفتر المحاضرات — بناء ناجح</b>\n\n📝 ${{ env.COMMIT }}\n🕐 ${{ env.BUILD_TIME }}\n📦 الحجم: ${{ env.ZIP_SIZE }}\"}"
-
-      - name: 📤 Send ZIP
+      - name: 📤 Send Web to Telegram
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
             -F "chat_id=${CHAT_ID}" \
-            -F "document=@lecture-notebook.zip" \
-            -F "caption=🎓 دفتر المحاضرات (${{ env.BUILD_TIME }})"
+            -F "document=@lecture-notebook-web.zip" \
+            -F "caption=🌐 نسخة الويب جاهزة ✅
+📝 ${{ env.COMMIT }}
+🕐 ${{ env.BUILD_TIME }}
+📦 ${{ env.WEB_SIZE }}"
 
+      # ─────────── APK الأندرويد ───────────
+      - name: 🤖 Install EAS CLI
+        run: npm install -g eas-cli
+
+      - name: 🔨 Trigger Android APK Build
+        id: eas_build
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          BUILD_JSON=$(eas build \
+            --platform android \
+            --profile preview \
+            --non-interactive \
+            --no-wait \
+            --json 2>/dev/null)
+          BUILD_URL=$(echo "$BUILD_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('buildDetailsPageUrl','https://expo.dev/builds'))" 2>/dev/null || echo "https://expo.dev/builds")
+          echo "EAS_URL=$BUILD_URL" >> $GITHUB_ENV
+
+      - name: 📱 Notify Android Build Started
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"chat_id\": \"${CHAT_ID}\",
+              \"parse_mode\": \"HTML\",
+              \"text\": \"📱 <b>جاري بناء APK الأندرويد...</b>\n\n⏳ سيكون جاهزاً خلال 10-15 دقيقة\n🔗 <a href='${{ env.EAS_URL }}'>اضغط هنا للتحميل عند الانتهاء</a>\"
+            }"
+
+      # ─────────── إشعار الفشل ───────────
       - name: ❌ Notify Failure
         if: failure()
         env:
@@ -63,4 +90,8 @@ jobs:
         run: |
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -H "Content-Type: application/json" \
-            -d "{\"chat_id\":\"${CHAT_ID}\",\"parse_mode\":\"HTML\",\"text\":\"❌ <b>فشل البناء</b>\n🔗 <a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>عرض الخطأ</a>\"}"
+            -d "{
+              \"chat_id\": \"${CHAT_ID}\",
+              \"parse_mode\": \"HTML\",
+              \"text\": \"❌ <b>فشل البناء</b>\n🔗 <a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>عرض الخطأ</a>\"
+            }"
