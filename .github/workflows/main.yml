@@ -45,10 +45,10 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
             -F "chat_id=${CHAT_ID}" \
             -F "document=@lecture-notebook-web.zip" \
-            -F "caption=🌐 نسخة الويب جاهزة ✅
-📝 ${{ env.COMMIT }}
-🕐 ${{ env.BUILD_TIME }}
-📦 ${{ env.WEB_SIZE }}"
+            -F "caption=🌐 نسخة الويب جاهزة "
+            📝 ${{ env.COMMIT }}
+            🕐 ${{ env.BUILD_TIME }}
+            📦 ${{ env.WEB_SIZE }}"
 
       # ─────────── APK الأندرويد ───────────
       - name: 🤖 Install EAS CLI
