@@ -1,18 +1,32 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, Alert, ActivityIndicator, Platform, Pressable, Modal,
+  TextInput, Alert, ActivityIndicator, Platform, Image,
+  FlatList, Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Audio } from 'expo-av';
+import * as ImagePicker from 'expo-image-picker';
 import { useColors } from '@/hooks/useColors';
-import { Lecture, updateLecture, getLecture } from '@/lib/storage';
-import { summarizeLecture, extractKeyPoints, generateQuestions, suggestTags, aiChat } from '@/lib/ai';
+import { Lecture, updateLecture, getLecture, QuestionAnswer } from '@/lib/storage';
+import {
+  summarizeLecture, extractKeyPoints, generateQuestions,
+  suggestTags, aiChat, analyzeWhiteboardImage,
+} from '@/lib/ai';
 
 type Tab = 'notes' | 'transcript' | 'ai';
+
+let speechRecognition: any = null;
+
+function getSpeechRecognition() {
+  if (Platform.OS !== 'web') return null;
+  if (typeof window === 'undefined') return null;
+  const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  return SR ? new SR() : null;
+}
 
 export default function LectureScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -37,11 +51,25 @@ export default function LectureScreen() {
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'ai'; text: string }[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
 
+  // Speech-to-text
+  const [isListening, setIsListening] = useState(false);
+  const [sttSupported] = useState(() => {
+    if (Platform.OS !== 'web') return false;
+    if (typeof window === 'undefined') return false;
+    return !!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition;
+  });
+
+  // Image analysis modal
+  const [analysisModal, setAnalysisModal] = useState(false);
+  const [analysisResult, setAnalysisResult] = useState('');
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+
   useEffect(() => {
     if (id) getLecture(id).then(l => { setLecture(l); setLoading(false); });
     return () => {
       if (durationTimer.current) clearInterval(durationTimer.current);
       sound?.unloadAsync();
+      if (speechRecognition) { try { speechRecognition.stop(); } catch {} }
     };
   }, [id]);
 
@@ -69,7 +97,7 @@ export default function LectureScreen() {
       setRecordDuration(0);
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       durationTimer.current = setInterval(() => setRecordDuration(d => d + 1), 1000);
-    } catch (e) {
+    } catch {
       Alert.alert('خطأ', 'تعذّر بدء التسجيل');
     }
   };
@@ -80,7 +108,6 @@ export default function LectureScreen() {
     try {
       await recording.stopAndUnloadAsync();
       const uri = recording.getURI();
-      const status = await recording.getStatusAsync();
       setRecording(null);
       setIsRecording(false);
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -88,7 +115,7 @@ export default function LectureScreen() {
         await save({ audioUri: uri, audioDuration: Math.round(recordDuration) });
         setTab('transcript');
       }
-    } catch (e) {
+    } catch {
       setIsRecording(false);
     }
   };
@@ -100,12 +127,144 @@ export default function LectureScreen() {
       else { await sound.playAsync(); setIsPlaying(true); }
       return;
     }
-    const { sound: s } = await Audio.Sound.createAsync({ uri: lecture.audioUri }, { shouldPlay: true });
+    const { sound: s } = await Audio.Sound.createAsync(
+      { uri: lecture.audioUri }, { shouldPlay: true }
+    );
     s.setOnPlaybackStatusUpdate(status => {
       if (status.isLoaded && status.didJustFinish) { setIsPlaying(false); setSound(null); }
     });
     setSound(s);
     setIsPlaying(true);
+  };
+
+  // ── Camera / Images ────────────────────────────────────────────────
+  const capturePhoto = async () => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          quality: 0.8,
+        });
+        if (!result.canceled && result.assets[0]) {
+          const uri = result.assets[0].uri;
+          await save({ imageUris: [...(lecture?.imageUris ?? []), uri] });
+        }
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        quality: 0.8,
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      });
+      if (!result.canceled && result.assets[0]) {
+        const uri = result.assets[0].uri;
+        await save({ imageUris: [...(lecture?.imageUris ?? []), uri] });
+        await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+    } catch {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        quality: 0.8,
+      });
+      if (!result.canceled && result.assets[0]) {
+        await save({ imageUris: [...(lecture?.imageUris ?? []), result.assets[0].uri] });
+      }
+    }
+  };
+
+  const pickFromGallery = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.8,
+      allowsMultipleSelection: true,
+    });
+    if (!result.canceled) {
+      const uris = result.assets.map(a => a.uri);
+      await save({ imageUris: [...(lecture?.imageUris ?? []), ...uris] });
+    }
+  };
+
+  const removeImage = (uri: string) => {
+    Alert.alert('حذف الصورة', 'هل تريد حذف هذه الصورة؟', [
+      { text: 'إلغاء', style: 'cancel' },
+      {
+        text: 'حذف', style: 'destructive', onPress: () => {
+          save({ imageUris: (lecture?.imageUris ?? []).filter(u => u !== uri) });
+        },
+      },
+    ]);
+  };
+
+  const analyzeImage = async (uri: string) => {
+    setAnalysisModal(true);
+    setAnalysisResult('');
+    setAnalysisLoading(true);
+    try {
+      let base64 = '';
+      if (Platform.OS === 'web') {
+        const resp = await fetch(uri);
+        const blob = await resp.blob();
+        base64 = await new Promise<string>(resolve => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const dataUrl = reader.result as string;
+            resolve(dataUrl.split(',')[1] ?? '');
+          };
+          reader.readAsDataURL(blob);
+        });
+      } else {
+        const FileSystem = require('expo-file-system');
+        base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+      }
+      const text = await analyzeWhiteboardImage(base64);
+      setAnalysisResult(text);
+    } catch {
+      setAnalysisResult('تعذّر تحليل الصورة. تحقق من مفتاح الذكاء الاصطناعي.');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  const addAnalysisToTranscript = () => {
+    if (!analysisResult) return;
+    const current = lecture?.transcript ?? '';
+    save({ transcript: current ? `${current}\n\n${analysisResult}` : analysisResult });
+    setAnalysisModal(false);
+    setTab('transcript');
+  };
+
+  // ── Speech-to-text ─────────────────────────────────────────────────
+  const toggleSpeechToText = () => {
+    if (!sttSupported) {
+      Alert.alert('غير مدعوم', 'التحويل الصوتي متاح فقط على المتصفح');
+      return;
+    }
+    if (isListening) {
+      try { speechRecognition?.stop(); } catch {}
+      setIsListening(false);
+      return;
+    }
+    try {
+      speechRecognition = getSpeechRecognition();
+      if (!speechRecognition) return;
+      speechRecognition.lang = 'ar-SA';
+      speechRecognition.continuous = true;
+      speechRecognition.interimResults = false;
+      speechRecognition.onresult = (event: any) => {
+        let text = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          text += event.results[i][0].transcript + ' ';
+        }
+        const current = lecture?.transcript ?? '';
+        save({ transcript: current ? `${current} ${text.trim()}` : text.trim() });
+      };
+      speechRecognition.onerror = () => setIsListening(false);
+      speechRecognition.onend = () => setIsListening(false);
+      speechRecognition.start();
+      setIsListening(true);
+    } catch {
+      setIsListening(false);
+    }
   };
 
   // ── AI Actions ─────────────────────────────────────────────────────
@@ -126,13 +285,13 @@ export default function LectureScreen() {
         await save({ keyPoints });
       } else if (action === 'questions') {
         const questions = await generateQuestions(text);
-        await save({ tags: questions });
+        await save({ questions });
       } else if (action === 'tags') {
         const tags = await suggestTags(text);
         await save({ tags });
       }
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch (e) {
+    } catch {
       Alert.alert('خطأ', 'تعذّر الاتصال بالذكاء الاصطناعي');
     } finally {
       setAiLoading(false);
@@ -156,7 +315,8 @@ export default function LectureScreen() {
     }
   };
 
-  const fmtDuration = (sec: number) => `${Math.floor(sec / 60).toString().padStart(2, '0')}:${(sec % 60).toString().padStart(2, '0')}`;
+  const fmtDuration = (sec: number) =>
+    `${Math.floor(sec / 60).toString().padStart(2, '0')}:${(sec % 60).toString().padStart(2, '0')}`;
 
   if (loading) {
     return (
@@ -175,6 +335,7 @@ export default function LectureScreen() {
   }
 
   const s = styles(colors);
+  const images = lecture.imageUris ?? [];
 
   return (
     <View style={[s.container, { paddingTop: insets.top }]}>
@@ -184,7 +345,10 @@ export default function LectureScreen() {
           <Ionicons name="chevron-back" size={22} color={colors.foreground} />
         </TouchableOpacity>
         <Text style={s.headerTitle} numberOfLines={1}>{lecture.title}</Text>
-        <TouchableOpacity onPress={() => router.push(`/lecture/canvas/${lecture.id}`)} style={s.canvasBtn}>
+        <TouchableOpacity onPress={capturePhoto} style={s.headerIconBtn}>
+          <Ionicons name="camera" size={20} color={colors.muted} />
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => router.push(`/lecture/canvas/${lecture.id}`)} style={s.headerIconBtn}>
           <Ionicons name="pencil" size={20} color={colors.accent} />
         </TouchableOpacity>
       </View>
@@ -207,10 +371,19 @@ export default function LectureScreen() {
             </TouchableOpacity>
             <View style={s.waveform}>
               {Array.from({ length: 20 }).map((_, i) => (
-                <View key={i} style={[s.waveBar, { height: 4 + Math.random() * 20, opacity: isPlaying ? 1 : 0.4 }]} />
+                <View
+                  key={i}
+                  style={[s.waveBar, {
+                    height: 4 + ((i * 7 + 3) % 17),
+                    opacity: isPlaying ? 1 : 0.4,
+                  }]}
+                />
               ))}
             </View>
             <Text style={s.recTime}>{fmtDuration(lecture.audioDuration ?? 0)}</Text>
+            <TouchableOpacity style={s.recStartBtn} onPress={startRecording}>
+              <Ionicons name="mic" size={16} color="#fff" />
+            </TouchableOpacity>
           </>
         ) : (
           <>
@@ -225,17 +398,64 @@ export default function LectureScreen() {
       {/* Tabs */}
       <View style={s.tabBar}>
         {(['notes', 'transcript', 'ai'] as Tab[]).map(t => (
-          <TouchableOpacity key={t} style={[s.tabBtn, tab === t && s.tabActive]} onPress={() => setTab(t)}>
+          <TouchableOpacity
+            key={t}
+            style={[s.tabBtn, tab === t && s.tabActive]}
+            onPress={() => setTab(t)}
+          >
             <Text style={[s.tabText, tab === t && s.tabTextActive]}>
               {t === 'notes' ? 'ملاحظات' : t === 'transcript' ? 'النص' : 'الذكاء الاصطناعي'}
             </Text>
+            {t === 'notes' && images.length > 0 && (
+              <View style={s.tabBadge}><Text style={s.tabBadgeText}>{images.length}</Text></View>
+            )}
           </TouchableOpacity>
         ))}
       </View>
 
-      {/* Content */}
+      {/* ── NOTES TAB ── */}
       {tab === 'notes' && (
-        <ScrollView style={s.content} contentContainerStyle={{ padding: 16 }}>
+        <ScrollView style={s.content} contentContainerStyle={{ padding: 16, gap: 14 }}>
+          {/* Images section */}
+          {images.length > 0 && (
+            <View>
+              <Text style={s.sectionLabel}>الصور ({images.length})</Text>
+              <FlatList
+                horizontal
+                data={images}
+                keyExtractor={i => i}
+                showsHorizontalScrollIndicator={false}
+                style={{ marginTop: 8 }}
+                renderItem={({ item }) => (
+                  <View style={s.thumbContainer}>
+                    <Image source={{ uri: item }} style={s.thumb} />
+                    <View style={s.thumbActions}>
+                      <TouchableOpacity style={s.thumbBtn} onPress={() => analyzeImage(item)}>
+                        <Ionicons name="scan" size={14} color={colors.primary} />
+                      </TouchableOpacity>
+                      <TouchableOpacity style={s.thumbBtn} onPress={() => removeImage(item)}>
+                        <Ionicons name="trash" size={14} color={colors.accentDanger} />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+              />
+            </View>
+          )}
+
+          {/* Add media buttons */}
+          <View style={s.mediaButtons}>
+            <TouchableOpacity style={s.mediaBtn} onPress={capturePhoto}>
+              <Ionicons name="camera" size={18} color={colors.primary} />
+              <Text style={s.mediaBtnText}>كاميرا</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={s.mediaBtn} onPress={pickFromGallery}>
+              <Ionicons name="images" size={18} color={colors.primary} />
+              <Text style={s.mediaBtnText}>معرض</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Text notes */}
           <TextInput
             style={s.notesInput}
             multiline
@@ -246,7 +466,10 @@ export default function LectureScreen() {
               const pages = [...lecture.pages];
               if (pages[0]) {
                 if (pages[0].textBoxes.length === 0) {
-                  pages[0].textBoxes = [{ id: 'tb1', text, x: 0, y: 0, width: 300, fontSize: 15, color: colors.foreground }];
+                  pages[0].textBoxes = [{
+                    id: 'tb1', text, x: 0, y: 0,
+                    width: 300, height: 100, fontSize: 15, color: colors.foreground,
+                  }];
                 } else {
                   pages[0].textBoxes[0] = { ...pages[0].textBoxes[0], text };
                 }
@@ -259,13 +482,37 @@ export default function LectureScreen() {
         </ScrollView>
       )}
 
+      {/* ── TRANSCRIPT TAB ── */}
       {tab === 'transcript' && (
         <ScrollView style={s.content} contentContainerStyle={{ padding: 16, gap: 12 }}>
-          <Text style={s.sectionLabel}>نص المحاضرة</Text>
+          <View style={s.transcriptHeader}>
+            <Text style={s.sectionLabel}>نص المحاضرة</Text>
+            {sttSupported && (
+              <TouchableOpacity
+                style={[s.sttBtn, isListening && s.sttBtnActive]}
+                onPress={toggleSpeechToText}
+              >
+                <Ionicons
+                  name={isListening ? 'stop-circle' : 'mic'}
+                  size={16}
+                  color={isListening ? '#fff' : colors.primary}
+                />
+                <Text style={[s.sttBtnText, isListening && { color: '#fff' }]}>
+                  {isListening ? 'إيقاف' : 'تحدّث'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {isListening && (
+            <View style={s.listeningBanner}>
+              <View style={s.listeningDot} />
+              <Text style={s.listeningText}>يستمع... تحدث بوضوح بالعربية</Text>
+            </View>
+          )}
           <TextInput
             style={s.transcriptInput}
             multiline
-            placeholder="أضف نص المحاضرة يدوياً أو عبر تسجيل الصوت..."
+            placeholder="أضف نص المحاضرة يدوياً أو اضغط 'تحدّث' للإملاء الصوتي..."
             placeholderTextColor={colors.mutedForeground}
             value={lecture.transcript ?? ''}
             onChangeText={text => save({ transcript: text })}
@@ -275,14 +522,14 @@ export default function LectureScreen() {
         </ScrollView>
       )}
 
+      {/* ── AI TAB ── */}
       {tab === 'ai' && (
         <View style={s.aiContainer}>
-          {/* AI Action Buttons */}
           <View style={s.aiActions}>
             {[
               { key: 'summarize', icon: 'document-text', label: 'ملخص' },
               { key: 'keypoints', icon: 'list', label: 'نقاط رئيسية' },
-              { key: 'questions', icon: 'help-circle', label: 'أسئلة متوقعة' },
+              { key: 'questions', icon: 'help-circle', label: 'أسئلة + إجابات' },
               { key: 'tags', icon: 'pricetag', label: 'كلمات مفتاحية' },
             ].map(a => (
               <TouchableOpacity
@@ -300,7 +547,6 @@ export default function LectureScreen() {
             ))}
           </View>
 
-          {/* AI Results */}
           <ScrollView style={s.aiResults} contentContainerStyle={{ padding: 14, gap: 12 }}>
             {lecture.summary && (
               <View style={s.aiCard}>
@@ -316,6 +562,23 @@ export default function LectureScreen() {
                 ))}
               </View>
             )}
+            {lecture.questions && lecture.questions.length > 0 && (
+              <View style={s.aiCard}>
+                <Text style={s.aiCardTitle}>أسئلة متوقعة للاختبار</Text>
+                {lecture.questions.map((qa: QuestionAnswer, i: number) => (
+                  <View key={i} style={s.qaItem}>
+                    <View style={s.qaQuestion}>
+                      <Text style={s.qaNum}>{i + 1}</Text>
+                      <Text style={s.qaText}>{qa.question}</Text>
+                    </View>
+                    <View style={s.qaAnswer}>
+                      <Ionicons name="checkmark-circle" size={14} color={colors.accent} />
+                      <Text style={s.qaAnswerText}>{qa.answer}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
             {lecture.tags && lecture.tags.length > 0 && (
               <View style={s.aiCard}>
                 <Text style={s.aiCardTitle}>كلمات مفتاحية</Text>
@@ -327,12 +590,13 @@ export default function LectureScreen() {
               </View>
             )}
 
-            {/* Chat */}
             <View style={s.aiCard}>
               <Text style={s.aiCardTitle}>اسأل عن المحاضرة</Text>
               {chatMessages.map((m, i) => (
                 <View key={i} style={[s.chatBubble, m.role === 'user' ? s.chatUser : s.chatAI]}>
-                  <Text style={[s.chatText, m.role === 'user' ? s.chatTextUser : s.chatTextAI]}>{m.text}</Text>
+                  <Text style={[s.chatText, m.role === 'user' ? s.chatTextUser : s.chatTextAI]}>
+                    {m.text}
+                  </Text>
                 </View>
               ))}
               {chatLoading && <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 8 }} />}
@@ -355,44 +619,162 @@ export default function LectureScreen() {
       )}
 
       <View style={{ height: insets.bottom + (Platform.OS === 'web' ? 34 : 0) }} />
+
+      {/* Image Analysis Modal */}
+      <Modal visible={analysisModal} transparent animationType="slide">
+        <View style={s.modalOverlay}>
+          <View style={s.modalSheet}>
+            <View style={s.modalHeader}>
+              <Text style={s.modalTitle}>تحليل الصورة بالذكاء الاصطناعي</Text>
+              <TouchableOpacity onPress={() => setAnalysisModal(false)}>
+                <Ionicons name="close" size={22} color={colors.foreground} />
+              </TouchableOpacity>
+            </View>
+            {analysisLoading ? (
+              <View style={{ alignItems: 'center', padding: 40, gap: 12 }}>
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={s.modalHint}>يحلّل الصورة...</Text>
+              </View>
+            ) : (
+              <>
+                <ScrollView style={{ maxHeight: 300 }} contentContainerStyle={{ padding: 4 }}>
+                  <Text style={s.modalText}>{analysisResult}</Text>
+                </ScrollView>
+                {!!analysisResult && (
+                  <TouchableOpacity style={s.modalAction} onPress={addAnalysisToTranscript}>
+                    <Ionicons name="add-circle" size={18} color="#fff" />
+                    <Text style={s.modalActionText}>إضافة إلى نص المحاضرة</Text>
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = (c: ReturnType<typeof useColors>) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: c.border },
+  header: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 14, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: c.border,
+  },
   backBtn: { padding: 4, marginRight: 6 },
   headerTitle: { flex: 1, fontFamily: 'Tajawal_700Bold', fontSize: 18, color: c.foreground },
-  canvasBtn: { padding: 4, backgroundColor: c.accent + '15', borderRadius: 8, borderWidth: 1, borderColor: c.accent + '30' },
-  recordBar: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, backgroundColor: c.surface, borderBottomWidth: 1, borderBottomColor: c.border },
+  headerIconBtn: {
+    padding: 7, backgroundColor: c.surface, borderRadius: 9,
+    borderWidth: 1, borderColor: c.border, marginLeft: 6,
+  },
+  recordBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    padding: 12, backgroundColor: c.surface,
+    borderBottomWidth: 1, borderBottomColor: c.border,
+  },
   recDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: c.recordingRed },
   recTime: { fontFamily: 'Tajawal_700Bold', fontSize: 14, color: c.foreground, minWidth: 40 },
   recLabel: { flex: 1, fontFamily: 'Tajawal_400Regular', fontSize: 13, color: c.muted },
   recStopBtn: { backgroundColor: c.recordingRed, borderRadius: 8, padding: 8 },
-  recStartBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: c.recordingRed, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8 },
+  recStartBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: c.recordingRed, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8,
+  },
   recStartText: { fontFamily: 'Tajawal_500Medium', fontSize: 13, color: '#fff' },
   playBtn: { backgroundColor: c.primary, borderRadius: 8, padding: 8 },
   waveform: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 2, height: 28 },
   waveBar: { width: 3, backgroundColor: c.waveform, borderRadius: 2 },
-  tabBar: { flexDirection: 'row', backgroundColor: c.surface, borderBottomWidth: 1, borderBottomColor: c.border },
-  tabBtn: { flex: 1, paddingVertical: 12, alignItems: 'center', borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabBar: {
+    flexDirection: 'row', backgroundColor: c.surface,
+    borderBottomWidth: 1, borderBottomColor: c.border,
+  },
+  tabBtn: {
+    flex: 1, paddingVertical: 12, alignItems: 'center',
+    borderBottomWidth: 2, borderBottomColor: 'transparent',
+    flexDirection: 'row', justifyContent: 'center', gap: 6,
+  },
   tabActive: { borderBottomColor: c.primary },
   tabText: { fontFamily: 'Tajawal_500Medium', fontSize: 13, color: c.muted },
   tabTextActive: { color: c.primary },
+  tabBadge: {
+    backgroundColor: c.primary, borderRadius: 8,
+    paddingHorizontal: 5, paddingVertical: 1, minWidth: 16, alignItems: 'center',
+  },
+  tabBadgeText: { fontFamily: 'Tajawal_700Bold', fontSize: 10, color: '#fff' },
   content: { flex: 1 },
-  notesInput: { fontFamily: 'Tajawal_400Regular', fontSize: 15, color: c.foreground, lineHeight: 26, minHeight: 300 },
-  sectionLabel: { fontFamily: 'Tajawal_700Bold', fontSize: 14, color: c.muted },
-  transcriptInput: { fontFamily: 'Tajawal_400Regular', fontSize: 15, color: c.foreground, lineHeight: 26, backgroundColor: c.card, borderRadius: 12, padding: 14, minHeight: 200, borderWidth: 1, borderColor: c.border },
+  sectionLabel: { fontFamily: 'Tajawal_700Bold', fontSize: 13, color: c.muted },
+  thumbContainer: { marginRight: 10 },
+  thumb: { width: 100, height: 80, borderRadius: 10, backgroundColor: c.surface },
+  thumbActions: { flexDirection: 'row', gap: 6, marginTop: 4, justifyContent: 'center' },
+  thumbBtn: {
+    backgroundColor: c.surfaceElevated, borderRadius: 6,
+    padding: 5, borderWidth: 1, borderColor: c.border,
+  },
+  mediaButtons: { flexDirection: 'row', gap: 10 },
+  mediaBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 6, backgroundColor: c.primary + '15', borderRadius: 10,
+    paddingVertical: 10, borderWidth: 1, borderColor: c.primary + '30',
+  },
+  mediaBtnText: { fontFamily: 'Tajawal_500Medium', fontSize: 13, color: c.primary },
+  notesInput: {
+    fontFamily: 'Tajawal_400Regular', fontSize: 15, color: c.foreground,
+    lineHeight: 26, minHeight: 200,
+  },
+  transcriptHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+  },
+  sttBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: c.primary + '15', borderRadius: 10,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderWidth: 1, borderColor: c.primary + '30',
+  },
+  sttBtnActive: { backgroundColor: c.recordingRed, borderColor: c.recordingRed },
+  sttBtnText: { fontFamily: 'Tajawal_500Medium', fontSize: 12, color: c.primary },
+  listeningBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: c.recordingRed + '20', borderRadius: 10,
+    padding: 10, borderWidth: 1, borderColor: c.recordingRed + '40',
+  },
+  listeningDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: c.recordingRed },
+  listeningText: { fontFamily: 'Tajawal_400Regular', fontSize: 13, color: c.recordingRed },
+  transcriptInput: {
+    fontFamily: 'Tajawal_400Regular', fontSize: 15, color: c.foreground,
+    lineHeight: 26, backgroundColor: c.card, borderRadius: 12,
+    padding: 14, minHeight: 200, borderWidth: 1, borderColor: c.border,
+  },
   aiContainer: { flex: 1 },
-  aiActions: { flexDirection: 'row', gap: 8, padding: 12, flexWrap: 'wrap', backgroundColor: c.surface, borderBottomWidth: 1, borderBottomColor: c.border },
-  aiActionBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: c.primary + '15', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1, borderColor: c.primary + '30' },
+  aiActions: {
+    flexDirection: 'row', gap: 8, padding: 12, flexWrap: 'wrap',
+    backgroundColor: c.surface, borderBottomWidth: 1, borderBottomColor: c.border,
+  },
+  aiActionBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: c.primary + '15', borderRadius: 10,
+    paddingHorizontal: 10, paddingVertical: 7,
+    borderWidth: 1, borderColor: c.primary + '30',
+  },
   aiActionText: { fontFamily: 'Tajawal_500Medium', fontSize: 12, color: c.primary },
   aiResults: { flex: 1 },
-  aiCard: { backgroundColor: c.card, borderRadius: 14, padding: 14, gap: 8, borderWidth: 1, borderColor: c.border },
+  aiCard: {
+    backgroundColor: c.card, borderRadius: 14, padding: 14, gap: 8,
+    borderWidth: 1, borderColor: c.border,
+  },
   aiCardTitle: { fontFamily: 'Tajawal_700Bold', fontSize: 14, color: c.primary },
   aiCardText: { fontFamily: 'Tajawal_400Regular', fontSize: 14, color: c.foreground, lineHeight: 22 },
   aiPoint: { fontFamily: 'Tajawal_400Regular', fontSize: 14, color: c.foreground, lineHeight: 24 },
+  qaItem: { gap: 4, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: c.border + '50' },
+  qaQuestion: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
+  qaNum: {
+    fontFamily: 'Tajawal_700Bold', fontSize: 12, color: '#fff',
+    backgroundColor: c.primary, borderRadius: 10,
+    paddingHorizontal: 6, paddingVertical: 1, marginTop: 2,
+  },
+  qaText: { flex: 1, fontFamily: 'Tajawal_500Medium', fontSize: 13, color: c.foreground, lineHeight: 20 },
+  qaAnswer: { flexDirection: 'row', gap: 6, alignItems: 'flex-start', paddingLeft: 26 },
+  qaAnswerText: { flex: 1, fontFamily: 'Tajawal_400Regular', fontSize: 13, color: c.muted, lineHeight: 20 },
   tag: { backgroundColor: c.primary + '20', borderRadius: 7, paddingHorizontal: 9, paddingVertical: 3 },
   tagText: { fontFamily: 'Tajawal_400Regular', fontSize: 12, color: c.primary },
   chatBubble: { borderRadius: 12, padding: 10, maxWidth: '85%' },
@@ -402,6 +784,36 @@ const styles = (c: ReturnType<typeof useColors>) => StyleSheet.create({
   chatTextUser: { color: '#fff' },
   chatTextAI: { color: c.foreground },
   chatInputRow: { flexDirection: 'row', gap: 8, marginTop: 6 },
-  chatInput: { flex: 1, backgroundColor: c.surface, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, fontFamily: 'Tajawal_400Regular', fontSize: 13, color: c.foreground, borderWidth: 1, borderColor: c.border },
-  chatSendBtn: { backgroundColor: c.primary, borderRadius: 10, padding: 10, alignItems: 'center', justifyContent: 'center' },
+  chatInput: {
+    flex: 1, backgroundColor: c.surface, borderRadius: 10,
+    paddingHorizontal: 12, paddingVertical: 8,
+    fontFamily: 'Tajawal_400Regular', fontSize: 13, color: c.foreground,
+    borderWidth: 1, borderColor: c.border,
+  },
+  chatSendBtn: {
+    backgroundColor: c.primary, borderRadius: 10, padding: 10,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: c.surfaceElevated, borderTopLeftRadius: 20,
+    borderTopRightRadius: 20, padding: 20, gap: 14,
+    borderTopWidth: 1, borderColor: c.border,
+  },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  modalTitle: { fontFamily: 'Tajawal_700Bold', fontSize: 16, color: c.foreground },
+  modalHint: { fontFamily: 'Tajawal_400Regular', fontSize: 13, color: c.muted },
+  modalText: {
+    fontFamily: 'Tajawal_400Regular', fontSize: 14, color: c.foreground,
+    lineHeight: 22, textAlign: 'right',
+  },
+  modalAction: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: c.primary, borderRadius: 12,
+    padding: 12, justifyContent: 'center',
+  },
+  modalActionText: { fontFamily: 'Tajawal_700Bold', fontSize: 14, color: '#fff' },
 });

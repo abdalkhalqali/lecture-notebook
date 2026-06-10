@@ -29,20 +29,32 @@ export interface Lecture {
   date: number;
   audioUri?: string;
   audioDuration?: number;
+  videoUri?: string;
+  imageUris?: string[];
   transcript?: string;
   summary?: string;
   keyPoints?: string[];
   tags?: string[];
+  questions?: QuestionAnswer[];
   pages: LecturePage[];
   createdAt: number;
   updatedAt: number;
 }
 
+export interface QuestionAnswer {
+  question: string;
+  answer: string;
+}
+
+export type PageTemplate = 'blank' | 'cornell' | 'math' | 'lined' | 'timeline';
+export type ShapeType = 'rect' | 'circle' | 'triangle' | 'arrow' | 'line';
+
 export interface LecturePage {
   id: string;
-  type: 'blank' | 'cornell' | 'lined';
+  type: PageTemplate;
   strokes: Stroke[];
   textBoxes: TextBox[];
+  shapes: CanvasShape[];
   createdAt: number;
 }
 
@@ -60,8 +72,21 @@ export interface TextBox {
   x: number;
   y: number;
   width: number;
+  height: number;
   fontSize: number;
   color: string;
+}
+
+export interface CanvasShape {
+  id: string;
+  type: ShapeType;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  color: string;
+  strokeWidth: number;
+  filled: boolean;
 }
 
 function uid(): string {
@@ -162,6 +187,7 @@ export async function createLecture(subjectId: string, title: string): Promise<L
     type: 'blank',
     strokes: [],
     textBoxes: [],
+    shapes: [],
     createdAt: now,
   };
   const item: Lecture = {
@@ -169,6 +195,7 @@ export async function createLecture(subjectId: string, title: string): Promise<L
     subjectId,
     title,
     date: now,
+    imageUris: [],
     pages: [defaultPage],
     createdAt: now,
     updatedAt: now,
