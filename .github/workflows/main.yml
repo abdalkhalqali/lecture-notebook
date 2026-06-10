@@ -23,7 +23,17 @@ jobs:
         env:
           CI: false
 
-      # ─────────── نسخة الويب ───────────
+      - name: 🔧 Fix Metro Config for Web
+        run: |
+          cat > metro.config.js << 'EOF'
+          const { getDefaultConfig } = require('expo/metro-config');
+          const config = getDefaultConfig(__dirname);
+          config.resolver.platforms = [...config.resolver.platforms, 'web'];
+          config.watchFolders = [];
+          config.resolver.blockList = [/.local\/.*/];
+          module.exports = config;
+          EOF
+
       - name: 🌐 Build Web
         run: npm run build:web
         env:
@@ -45,43 +55,8 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
             -F "chat_id=${CHAT_ID}" \
             -F "document=@lecture-notebook-web.zip" \
-            -F "caption=🌐 نسخة الويب جاهزة "
-            📝 ${{ env.COMMIT }}
-            🕐 ${{ env.BUILD_TIME }}
-            📦 ${{ env.WEB_SIZE }}"
+            -F "caption=🌐 نسخة الويب جاهزة%0A📝 ${{ env.COMMIT }}%0A🕐 ${{ env.BUILD_TIME }}%0A📦 ${{ env.WEB_SIZE }}"
 
-      # ─────────── APK الأندرويد ───────────
-      - name: 🤖 Install EAS CLI
-        run: npm install -g eas-cli
-
-      - name: 🔨 Trigger Android APK Build
-        id: eas_build
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          BUILD_JSON=$(eas build \
-            --platform android \
-            --profile preview \
-            --non-interactive \
-            --no-wait \
-            --json 2>/dev/null)
-          BUILD_URL=$(echo "$BUILD_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0].get('buildDetailsPageUrl','https://expo.dev/builds'))" 2>/dev/null || echo "https://expo.dev/builds")
-          echo "EAS_URL=$BUILD_URL" >> $GITHUB_ENV
-
-      - name: 📱 Notify Android Build Started
-        env:
-          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"chat_id\": \"${CHAT_ID}\",
-              \"parse_mode\": \"HTML\",
-              \"text\": \"📱 <b>جاري بناء APK الأندرويد...</b>\n\n⏳ سيكون جاهزاً خلال 10-15 دقيقة\n🔗 <a href='${{ env.EAS_URL }}'>اضغط هنا للتحميل عند الانتهاء</a>\"
-            }"
-
-      # ─────────── إشعار الفشل ───────────
       - name: ❌ Notify Failure
         if: failure()
         env:
@@ -93,5 +68,5 @@ jobs:
             -d "{
               \"chat_id\": \"${CHAT_ID}\",
               \"parse_mode\": \"HTML\",
-              \"text\": \"❌ <b>فشل البناء</b>\n🔗 <a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>عرض الخطأ</a>\"
+              \"text\": \"❌ <b>فشل بناء الويب</b>\n🔗 <a href='https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'>عرض الخطأ</a>\"
             }"
