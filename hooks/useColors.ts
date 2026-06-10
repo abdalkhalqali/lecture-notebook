@@ -1,5 +1,5 @@
-import { Colors } from '@/constants/colors';
+import { useTheme } from '@/context/ThemeContext';
 
 export function useColors() {
-  return Colors.dark;
+  return useTheme().colors;
 }

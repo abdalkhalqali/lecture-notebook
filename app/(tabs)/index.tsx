@@ -1,23 +1,35 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  Pressable, Platform, Modal, TextInput, Alert,
+  Pressable, Platform, Modal, TextInput, Alert, Animated,
+  Dimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import * as Haptics from '@/lib/haptics';
 import { useColors } from '@/hooks/useColors';
+import { useTheme } from '@/context/ThemeContext';
 import { useApp } from '@/context/AppContext';
 import { University, Year, Subject } from '@/lib/storage';
+import { THEMES, ThemeId } from '@/constants/colors';
+
+const SCREEN_W = Dimensions.get('window').width;
+const DRAWER_W = Math.min(SCREEN_W * 0.78, 320);
 
 const SUBJECT_COLORS = ['#4F8EF7','#10B981','#F59E0B','#EF4444','#8B5CF6','#06B6D4','#F97316','#EC4899'];
 const SUBJECT_ICONS = ['book','flask','calculator','globe','musical-notes','leaf','rocket','heart'];
+
+const THEME_ORDER: ThemeId[] = ['darkNavy', 'darkBlack', 'darkPurple', 'oceanBlue', 'light', 'cream'];
+const THEME_ICONS: Record<ThemeId, string> = {
+  darkNavy: '🌙', darkBlack: '⚫', darkPurple: '🟣', oceanBlue: '🌊', light: '☀️', cream: '📜',
+};
 
 type ViewMode = 'universities' | 'years' | 'subjects' | 'lectures';
 
 export default function HomeScreen() {
   const colors = useColors();
+  const { themeId, setTheme } = useTheme();
   const insets = useSafeAreaInsets();
   const {
     universities, years, subjects, lectures,
@@ -33,8 +45,28 @@ export default function HomeScreen() {
   const [selectedColor, setSelectedColor] = useState(SUBJECT_COLORS[0]);
   const [selectedIconIdx, setSelectedIconIdx] = useState(0);
   const [creating, setCreating] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const drawerAnim = useRef(new Animated.Value(-DRAWER_W)).current;
+  const overlayAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => { loadUniversities(); }, []);
+
+  const openDrawer = () => {
+    setDrawerOpen(true);
+    Animated.parallel([
+      Animated.spring(drawerAnim, { toValue: 0, useNativeDriver: true, tension: 65, friction: 11 }),
+      Animated.timing(overlayAnim, { toValue: 1, duration: 250, useNativeDriver: true }),
+    ]).start();
+    Haptics.selectionAsync();
+  };
+
+  const closeDrawer = () => {
+    Animated.parallel([
+      Animated.spring(drawerAnim, { toValue: -DRAWER_W, useNativeDriver: true, tension: 80, friction: 14 }),
+      Animated.timing(overlayAnim, { toValue: 0, duration: 200, useNativeDriver: true }),
+    ]).start(() => setDrawerOpen(false));
+  };
 
   const handleUniversityPress = async (u: University) => {
     await Haptics.selectionAsync();
@@ -126,6 +158,9 @@ export default function HomeScreen() {
     <View style={[s.container, { paddingTop: insets.top + (Platform.OS === 'web' ? 67 : 0) }]}>
       {/* Header */}
       <View style={s.header}>
+        <TouchableOpacity onPress={openDrawer} style={s.menuBtn}>
+          <Ionicons name="menu" size={24} color={colors.foreground} />
+        </TouchableOpacity>
         {viewMode !== 'universities' && (
           <TouchableOpacity onPress={handleBack} style={s.backBtn}>
             <Ionicons name="chevron-back" size={22} color={colors.foreground} />
@@ -172,8 +207,8 @@ export default function HomeScreen() {
                   <Text style={s.lectureName}>{item.title}</Text>
                   <Text style={s.lectureMeta}>
                     {new Date(item.date).toLocaleDateString('ar-SA')}
-                    {item.audioUri ? '  •  🎙️ تسجيل' : ''}
-                    {item.summary ? '  •  🤖 ملخص' : ''}
+                    {item.audioUri ? '  •  🎙️' : ''}
+                    {item.summary ? '  •  🤖' : ''}
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={16} color={colors.mutedForeground} />
@@ -247,14 +282,108 @@ export default function HomeScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Side Drawer */}
+      {drawerOpen && (
+        <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+          {/* Overlay */}
+          <Animated.View
+            style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.55)', opacity: overlayAnim }]}
+            pointerEvents={drawerOpen ? 'auto' : 'none'}
+          >
+            <TouchableOpacity style={{ flex: 1 }} onPress={closeDrawer} activeOpacity={1} />
+          </Animated.View>
+
+          {/* Drawer panel */}
+          <Animated.View
+            style={[s.drawer, { transform: [{ translateX: drawerAnim }], backgroundColor: colors.surface, borderRightColor: colors.border }]}
+          >
+            {/* Drawer header */}
+            <View style={[s.drawerHeader, { borderBottomColor: colors.border, paddingTop: insets.top + (Platform.OS === 'web' ? 60 : 8) }]}>
+              <Text style={[s.drawerTitle, { color: colors.foreground }]}>دفتر المحاضرات</Text>
+              <TouchableOpacity onPress={closeDrawer} style={{ padding: 4 }}>
+                <Ionicons name="close" size={22} color={colors.muted} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Theme section */}
+            <View style={s.drawerSection}>
+              <Text style={[s.drawerSectionTitle, { color: colors.muted }]}>مظهر التطبيق</Text>
+              <View style={s.themeGrid}>
+                {THEME_ORDER.map(tid => {
+                  const theme = THEMES[tid];
+                  const isActive = themeId === tid;
+                  return (
+                    <TouchableOpacity
+                      key={tid}
+                      onPress={() => { setTheme(tid); Haptics.selectionAsync(); }}
+                      style={[
+                        s.themeCard,
+                        { backgroundColor: theme.background, borderColor: isActive ? theme.primary : theme.border },
+                        isActive && { borderWidth: 2.5 },
+                      ]}
+                    >
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <Text style={{ fontSize: 18 }}>{THEME_ICONS[tid]}</Text>
+                        {isActive && (
+                          <View style={{ backgroundColor: theme.primary, borderRadius: 8, padding: 2 }}>
+                            <Ionicons name="checkmark" size={10} color="#fff" />
+                          </View>
+                        )}
+                      </View>
+                      <View style={{ flexDirection: 'row', gap: 4, marginTop: 6 }}>
+                        {[theme.primary, theme.accent, theme.accentDanger].map((c, i) => (
+                          <View key={i} style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: c }} />
+                        ))}
+                      </View>
+                      <Text style={{ fontFamily: 'Tajawal_500Medium', fontSize: 11, color: theme.muted, marginTop: 4 }}>
+                        {theme.nameAr}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* Quick links */}
+            <View style={[s.drawerSection, { borderTopWidth: 1, borderTopColor: colors.border }]}>
+              <Text style={[s.drawerSectionTitle, { color: colors.muted }]}>روابط سريعة</Text>
+              {[
+                { icon: 'book-outline', label: 'محاضراتي', onPress: closeDrawer },
+                { icon: 'search-outline', label: 'البحث', onPress: () => { closeDrawer(); router.push('/(tabs)/search'); } },
+                { icon: 'bar-chart-outline', label: 'الإحصاءات', onPress: () => { closeDrawer(); router.push('/(tabs)/stats'); } },
+              ].map(item => (
+                <TouchableOpacity
+                  key={item.label}
+                  onPress={item.onPress}
+                  style={[s.drawerLink, { borderColor: colors.border }]}
+                >
+                  <Ionicons name={item.icon as any} size={18} color={colors.primary} />
+                  <Text style={[s.drawerLinkText, { color: colors.foreground }]}>{item.label}</Text>
+                  <Ionicons name="chevron-forward" size={14} color={colors.mutedForeground} />
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Tips */}
+            <View style={[s.drawerTip, { backgroundColor: colors.primary + '12', borderColor: colors.primary + '30' }]}>
+              <Ionicons name="bulb-outline" size={16} color={colors.primary} />
+              <Text style={[s.drawerTipText, { color: colors.muted }]}>
+                في لوحة الكتابة: اضغط على أداة النص ثم اضغط على اللوحة لإضافة نص. اضغط على المربع لتحديده وحذفه.
+              </Text>
+            </View>
+          </Animated.View>
+        </View>
+      )}
     </View>
   );
 }
 
 const styles = (c: ReturnType<typeof useColors>) => StyleSheet.create({
   container: { flex: 1, backgroundColor: c.background },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: c.border },
-  backBtn: { marginRight: 8, padding: 4 },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: c.border },
+  menuBtn: { padding: 4, marginRight: 4 },
+  backBtn: { padding: 4, marginRight: 2 },
   headerTitle: { flex: 1, fontFamily: 'Tajawal_700Bold', fontSize: 20, color: c.foreground },
   addBtn: { padding: 4 },
   breadcrumb: { paddingHorizontal: 16, paddingVertical: 6, backgroundColor: c.surface },
@@ -286,4 +415,16 @@ const styles = (c: ReturnType<typeof useColors>) => StyleSheet.create({
   iconBtn: { width: 42, height: 42, borderRadius: 10, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'transparent', backgroundColor: 'transparent' },
   modalBtn: { backgroundColor: c.primary, borderRadius: 14, padding: 16, alignItems: 'center', marginTop: 4 },
   modalBtnText: { fontFamily: 'Tajawal_700Bold', fontSize: 16, color: '#fff' },
+  // Drawer
+  drawer: { position: 'absolute', top: 0, left: 0, bottom: 0, width: DRAWER_W, borderRightWidth: 1, shadowColor: '#000', shadowOffset: { width: 4, height: 0 }, shadowOpacity: 0.35, shadowRadius: 12, elevation: 16 },
+  drawerHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 14, borderBottomWidth: 1 },
+  drawerTitle: { fontFamily: 'Tajawal_700Bold', fontSize: 18 },
+  drawerSection: { padding: 20, gap: 12 },
+  drawerSectionTitle: { fontFamily: 'Tajawal_500Medium', fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.5 },
+  themeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  themeCard: { width: (DRAWER_W - 60) / 3, borderRadius: 12, padding: 10, borderWidth: 1 },
+  drawerLink: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderBottomWidth: 1 },
+  drawerLinkText: { flex: 1, fontFamily: 'Tajawal_500Medium', fontSize: 15 },
+  drawerTip: { margin: 16, borderRadius: 12, padding: 12, flexDirection: 'row', gap: 8, borderWidth: 1 },
+  drawerTipText: { flex: 1, fontFamily: 'Tajawal_400Regular', fontSize: 12, lineHeight: 18 },
 });

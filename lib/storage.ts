@@ -46,7 +46,9 @@ export interface QuestionAnswer {
   answer: string;
 }
 
-export type PageTemplate = 'blank' | 'cornell' | 'math' | 'lined' | 'timeline';
+export type PageTemplate =
+  | 'blank' | 'grid' | 'cornell' | 'math' | 'lined' | 'timeline'
+  | 'dotted' | 'isometric' | 'music' | 'bullet' | 'weekly' | 'hexagonal';
 export type ShapeType = 'rect' | 'circle' | 'triangle' | 'arrow' | 'line';
 
 export interface LecturePage {

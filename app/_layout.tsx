@@ -8,10 +8,30 @@ import { KeyboardProvider } from 'react-native-keyboard-controller';
 import * as SplashScreen from 'expo-splash-screen';
 import { useFonts, Tajawal_400Regular, Tajawal_500Medium, Tajawal_700Bold } from '@expo-google-fonts/tajawal';
 import { AppProvider } from '@/context/AppContext';
-import { Colors } from '@/constants/colors';
+import { ThemeProvider, useTheme } from '@/context/ThemeContext';
 
 SplashScreen.preventAutoHideAsync();
 const queryClient = new QueryClient();
+
+function AppShell() {
+  const { colors } = useTheme();
+  return (
+    <>
+      <StatusBar style={colors.statusBar} />
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          contentStyle: { backgroundColor: colors.background },
+          animation: 'slide_from_right',
+        }}
+      >
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="lecture/[id]" options={{ animation: 'slide_from_bottom' }} />
+        <Stack.Screen name="lecture/canvas/[id]" options={{ animation: 'fade' }} />
+      </Stack>
+    </>
+  );
+}
 
 export default function RootLayout() {
   const [fontsLoaded, fontError] = useFonts({
@@ -29,24 +49,15 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <QueryClientProvider client={queryClient}>
-          <KeyboardProvider>
-            <AppProvider>
-              <StatusBar style="light" />
-              <Stack
-                screenOptions={{
-                  headerShown: false,
-                  contentStyle: { backgroundColor: Colors.dark.background },
-                  animation: 'slide_from_right',
-                }}
-              >
-                <Stack.Screen name="(tabs)" />
-                <Stack.Screen name="lecture/[id]" options={{ animation: 'slide_from_bottom' }} />
-                <Stack.Screen name="lecture/canvas/[id]" options={{ animation: 'fade' }} />
-              </Stack>
-            </AppProvider>
-          </KeyboardProvider>
-        </QueryClientProvider>
+        <ThemeProvider>
+          <QueryClientProvider client={queryClient}>
+            <KeyboardProvider>
+              <AppProvider>
+                <AppShell />
+              </AppProvider>
+            </KeyboardProvider>
+          </QueryClientProvider>
+        </ThemeProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
