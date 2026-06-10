@@ -285,11 +285,10 @@ export default function HomeScreen() {
 
       {/* Side Drawer */}
       {drawerOpen && (
-        <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+        <View style={[StyleSheet.absoluteFill, { pointerEvents: 'box-none' } as any]}>
           {/* Overlay */}
           <Animated.View
-            style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.55)', opacity: overlayAnim }]}
-            pointerEvents={drawerOpen ? 'auto' : 'none'}
+            style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.55)', opacity: overlayAnim, pointerEvents: drawerOpen ? 'auto' : 'none' } as any]}
           >
             <TouchableOpacity style={{ flex: 1 }} onPress={closeDrawer} activeOpacity={1} />
           </Animated.View>
