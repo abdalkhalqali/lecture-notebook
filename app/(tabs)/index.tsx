@@ -6,7 +6,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import * as Haptics from 'expo-haptics';
+import * as Haptics from '@/lib/haptics';
 import { useColors } from '@/hooks/useColors';
 import { useApp } from '@/context/AppContext';
 import { University, Year, Subject } from '@/lib/storage';

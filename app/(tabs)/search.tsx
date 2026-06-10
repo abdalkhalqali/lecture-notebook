@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, TextInput, FlatList, TouchableOpacity, Platform
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import * as Haptics from 'expo-haptics';
+import * as Haptics from '@/lib/haptics';
 import { useColors } from '@/hooks/useColors';
 import { searchLectures, Lecture } from '@/lib/storage';
 

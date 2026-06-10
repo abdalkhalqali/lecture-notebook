@@ -8,7 +8,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path, G, Rect, Ellipse, Line, Polygon } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
-import * as Haptics from 'expo-haptics';
+import * as Haptics from '@/lib/haptics';
 import { useColors } from '@/hooks/useColors';
 import {
   getLecture, updateLecture, Stroke, LecturePage,
