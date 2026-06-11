@@ -22,6 +22,16 @@ export interface Subject {
   createdAt: number;
 }
 
+export interface LectureAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  uri: string;
+  textContent?: string;
+  createdAt: number;
+}
+
 export interface Lecture {
   id: string;
   subjectId: string;
@@ -31,6 +41,7 @@ export interface Lecture {
   audioDuration?: number;
   videoUri?: string;
   imageUris?: string[];
+  attachments?: LectureAttachment[];
   transcript?: string;
   summary?: string;
   keyPoints?: string[];

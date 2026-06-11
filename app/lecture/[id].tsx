@@ -11,13 +11,29 @@ import * as Haptics from '@/lib/haptics';
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import { useColors } from '@/hooks/useColors';
-import { Lecture, updateLecture, getLecture, QuestionAnswer } from '@/lib/storage';
+import { Lecture, LectureAttachment, updateLecture, getLecture, QuestionAnswer } from '@/lib/storage';
 import {
   summarizeLecture, extractKeyPoints, generateQuestions,
-  suggestTags, aiChat, analyzeWhiteboardImage,
+  suggestTags, aiChat, analyzeWhiteboardImage, analyzeDocument, analyzeImageAttachment,
 } from '@/lib/ai';
 
-type Tab = 'notes' | 'transcript' | 'ai';
+type Tab = 'notes' | 'transcript' | 'ai' | 'files';
+
+function getFileIcon(mimeType: string): { name: string; color: string } {
+  if (mimeType.startsWith('image/')) return { name: 'image', color: '#10B981' };
+  if (mimeType.includes('pdf')) return { name: 'document', color: '#EF4444' };
+  if (mimeType.includes('word') || mimeType.includes('document')) return { name: 'document-text', color: '#3B82F6' };
+  if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) return { name: 'easel', color: '#F59E0B' };
+  if (mimeType.includes('sheet') || mimeType.includes('excel') || mimeType.includes('csv')) return { name: 'grid', color: '#059669' };
+  if (mimeType.includes('text')) return { name: 'document-text', color: '#6366F1' };
+  return { name: 'attach', color: '#8B5CF6' };
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 let speechRecognition: any = null;
 
@@ -63,6 +79,14 @@ export default function LectureScreen() {
   const [analysisModal, setAnalysisModal] = useState(false);
   const [analysisResult, setAnalysisResult] = useState('');
   const [analysisLoading, setAnalysisLoading] = useState(false);
+
+  // File attachments
+  const [fileUploading, setFileUploading] = useState(false);
+  const [fileAiModal, setFileAiModal] = useState<LectureAttachment | null>(null);
+  const [fileAiLoading, setFileAiLoading] = useState(false);
+  const [fileAiResult, setFileAiResult] = useState<{
+    summary: string; keyPoints: string[]; questions: QuestionAnswer[]; tags: string[];
+  } | null>(null);
 
   useEffect(() => {
     if (id) getLecture(id).then(l => { setLecture(l); setLoading(false); });
@@ -233,6 +257,129 @@ export default function LectureScreen() {
     setTab('transcript');
   };
 
+  // ── File Attachments ───────────────────────────────────────────────
+  const pickFile = () => {
+    if (Platform.OS !== 'web') {
+      Alert.alert('رفع الملفات', 'رفع الملفات متاح حالياً على المتصفح فقط');
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '*/*';
+    input.multiple = true;
+    input.onchange = async (e: any) => {
+      const files: FileList = e.target.files;
+      if (!files || files.length === 0) return;
+      setFileUploading(true);
+      try {
+        const newAttachments: LectureAttachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          if (file.size > 10 * 1024 * 1024) {
+            Alert.alert('الملف كبير', `"${file.name}" أكبر من 10MB. جرّب ملفاً أصغر.`);
+            continue;
+          }
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+          let textContent: string | undefined;
+          if (file.type.startsWith('text/') || file.name.endsWith('.txt') || file.name.endsWith('.md') || file.name.endsWith('.csv')) {
+            textContent = await new Promise<string>((resolve, reject) => {
+              const r = new FileReader();
+              r.onload = () => resolve(r.result as string);
+              r.onerror = reject;
+              r.readAsText(file, 'UTF-8');
+            });
+          }
+          newAttachments.push({
+            id: Date.now().toString() + Math.random().toString(36).substr(2, 6) + i,
+            name: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            size: file.size,
+            uri: dataUrl,
+            textContent,
+            createdAt: Date.now(),
+          });
+        }
+        if (newAttachments.length > 0) {
+          const updated = [...(lecture?.attachments ?? []), ...newAttachments];
+          await save({ attachments: updated });
+          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      } catch {
+        Alert.alert('خطأ', 'تعذّر رفع الملف');
+      } finally {
+        setFileUploading(false);
+      }
+    };
+    input.click();
+  };
+
+  const removeAttachment = (attId: string) => {
+    Alert.alert('حذف الملف', 'هل تريد حذف هذا الملف من المحاضرة؟', [
+      { text: 'إلغاء', style: 'cancel' },
+      {
+        text: 'حذف', style: 'destructive', onPress: () => {
+          const updated = (lecture?.attachments ?? []).filter(a => a.id !== attId);
+          save({ attachments: updated });
+        },
+      },
+    ]);
+  };
+
+  const openFileAnalysis = async (att: LectureAttachment) => {
+    setFileAiModal(att);
+    setFileAiResult(null);
+    setFileAiLoading(true);
+    try {
+      if (att.mimeType.startsWith('image/')) {
+        const base64 = att.uri.includes(',') ? att.uri.split(',')[1] : att.uri;
+        const text = await analyzeImageAttachment(base64, att.mimeType);
+        setFileAiResult({
+          summary: text, keyPoints: [], questions: [], tags: [],
+        });
+      } else if (att.textContent) {
+        const result = await analyzeDocument(att.textContent, att.name);
+        setFileAiResult(result);
+      } else {
+        const base64 = att.uri.includes(',') ? att.uri.split(',')[1] : att.uri;
+        let text = '';
+        try {
+          text = atob(base64).slice(0, 3000);
+        } catch {}
+        if (text.trim()) {
+          const result = await analyzeDocument(text, att.name);
+          setFileAiResult(result);
+        } else {
+          setFileAiResult({
+            summary: `تعذّر استخراج النص من "${att.name}" تلقائياً. يمكنك نسخ المحتوى من الملف ولصقه في تبويب "النص" ثم استخدام الذكاء الاصطناعي هناك.`,
+            keyPoints: [], questions: [], tags: [],
+          });
+        }
+      }
+    } catch {
+      setFileAiResult({ summary: 'تعذّر تحليل الملف. تحقق من الاتصال وحاول مرة أخرى.', keyPoints: [], questions: [], tags: [] });
+    } finally {
+      setFileAiLoading(false);
+    }
+  };
+
+  const addFileResultToLecture = () => {
+    if (!fileAiResult) return;
+    const updates: Partial<Lecture> = {};
+    if (fileAiResult.summary) updates.summary = fileAiResult.summary;
+    if (fileAiResult.keyPoints.length > 0) updates.keyPoints = fileAiResult.keyPoints;
+    if (fileAiResult.questions.length > 0) updates.questions = fileAiResult.questions;
+    if (fileAiResult.tags.length > 0) updates.tags = fileAiResult.tags;
+    save(updates);
+    setFileAiModal(null);
+    setTab('ai');
+    Alert.alert('تم', 'تمت إضافة نتائج التحليل إلى تبويب الذكاء الاصطناعي');
+  };
+
   // ── Speech-to-text ─────────────────────────────────────────────────
   const toggleSpeechToText = () => {
     if (!sttSupported) {
@@ -397,17 +544,20 @@ export default function LectureScreen() {
 
       {/* Tabs */}
       <View style={s.tabBar}>
-        {(['notes', 'transcript', 'ai'] as Tab[]).map(t => (
+        {(['notes', 'transcript', 'ai', 'files'] as Tab[]).map(t => (
           <TouchableOpacity
             key={t}
             style={[s.tabBtn, tab === t && s.tabActive]}
             onPress={() => setTab(t)}
           >
             <Text style={[s.tabText, tab === t && s.tabTextActive]}>
-              {t === 'notes' ? 'ملاحظات' : t === 'transcript' ? 'النص' : 'الذكاء الاصطناعي'}
+              {t === 'notes' ? 'ملاحظات' : t === 'transcript' ? 'النص' : t === 'ai' ? 'الذكاء' : 'ملفات'}
             </Text>
             {t === 'notes' && images.length > 0 && (
               <View style={s.tabBadge}><Text style={s.tabBadgeText}>{images.length}</Text></View>
+            )}
+            {t === 'files' && (lecture?.attachments?.length ?? 0) > 0 && (
+              <View style={s.tabBadge}><Text style={s.tabBadgeText}>{lecture.attachments!.length}</Text></View>
             )}
           </TouchableOpacity>
         ))}
@@ -618,7 +768,135 @@ export default function LectureScreen() {
         </View>
       )}
 
+      {/* ── FILES TAB ── */}
+      {tab === 'files' && (
+        <View style={{ flex: 1 }}>
+          {/* Upload bar */}
+          <View style={s.fileUploadBar}>
+            <TouchableOpacity
+              style={[s.fileUploadBtn, fileUploading && { opacity: 0.5 }]}
+              onPress={pickFile}
+              disabled={fileUploading}
+            >
+              {fileUploading
+                ? <ActivityIndicator size={16} color="#fff" />
+                : <Ionicons name="attach" size={18} color="#fff" />
+              }
+              <Text style={s.fileUploadBtnText}>{fileUploading ? 'جاري الرفع...' : 'إرفاق ملف'}</Text>
+            </TouchableOpacity>
+            <Text style={s.fileUploadHint}>PDF، صور، نصوص، بوربوينت...</Text>
+          </View>
+
+          {/* File list */}
+          {(lecture.attachments ?? []).length === 0 ? (
+            <View style={s.fileEmptyState}>
+              <Ionicons name="folder-open-outline" size={52} color={colors.muted} />
+              <Text style={s.fileEmptyTitle}>لا توجد ملفات مرفقة</Text>
+              <Text style={s.fileEmptyHint}>أرفق ملفات PDF أو صور أو نصوص لتحليلها بالذكاء الاصطناعي</Text>
+            </View>
+          ) : (
+            <ScrollView style={s.content} contentContainerStyle={{ padding: 14, gap: 10 }}>
+              {(lecture.attachments ?? []).map(att => {
+                const icon = getFileIcon(att.mimeType);
+                return (
+                  <View key={att.id} style={s.fileCard}>
+                    <View style={[s.fileIconBox, { backgroundColor: icon.color + '20' }]}>
+                      <Ionicons name={icon.name as any} size={26} color={icon.color} />
+                    </View>
+                    <View style={s.fileInfo}>
+                      <Text style={s.fileName} numberOfLines={1}>{att.name}</Text>
+                      <Text style={s.fileMeta}>{formatFileSize(att.size)} · {att.mimeType.split('/')[1] ?? att.mimeType}</Text>
+                    </View>
+                    <View style={s.fileActions}>
+                      <TouchableOpacity
+                        style={[s.fileActionBtn, { backgroundColor: colors.primary + '18' }]}
+                        onPress={() => openFileAnalysis(att)}
+                      >
+                        <Ionicons name="sparkles" size={15} color={colors.primary} />
+                        <Text style={[s.fileActionText, { color: colors.primary }]}>تحليل</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[s.fileActionBtn, { backgroundColor: colors.accentDanger + '15' }]}
+                        onPress={() => removeAttachment(att.id)}
+                      >
+                        <Ionicons name="trash-outline" size={15} color={colors.accentDanger} />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                );
+              })}
+            </ScrollView>
+          )}
+        </View>
+      )}
+
       <View style={{ height: insets.bottom + (Platform.OS === 'web' ? 34 : 0) }} />
+
+      {/* File AI Analysis Modal */}
+      <Modal visible={!!fileAiModal} transparent animationType="slide">
+        <View style={s.modalOverlay}>
+          <View style={[s.modalSheet, { maxHeight: '85%' }]}>
+            <View style={s.modalHeader}>
+              <Text style={s.modalTitle} numberOfLines={1}>
+                تحليل: {fileAiModal?.name ?? ''}
+              </Text>
+              <TouchableOpacity onPress={() => setFileAiModal(null)}>
+                <Ionicons name="close" size={22} color={colors.foreground} />
+              </TouchableOpacity>
+            </View>
+            {fileAiLoading ? (
+              <View style={{ alignItems: 'center', padding: 40, gap: 12 }}>
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={s.modalHint}>يحلّل الذكاء الاصطناعي الملف...</Text>
+              </View>
+            ) : fileAiResult ? (
+              <ScrollView style={{ maxHeight: 400 }} contentContainerStyle={{ gap: 12 }}>
+                {!!fileAiResult.summary && (
+                  <View>
+                    <Text style={[s.modalTitle, { fontSize: 13, marginBottom: 4 }]}>الملخص</Text>
+                    <Text style={s.modalText}>{fileAiResult.summary}</Text>
+                  </View>
+                )}
+                {fileAiResult.keyPoints.length > 0 && (
+                  <View>
+                    <Text style={[s.modalTitle, { fontSize: 13, marginBottom: 4 }]}>النقاط الرئيسية</Text>
+                    {fileAiResult.keyPoints.map((kp, i) => (
+                      <Text key={i} style={[s.modalText, { marginBottom: 2 }]}>• {kp}</Text>
+                    ))}
+                  </View>
+                )}
+                {fileAiResult.questions.length > 0 && (
+                  <View>
+                    <Text style={[s.modalTitle, { fontSize: 13, marginBottom: 4 }]}>أسئلة متوقعة</Text>
+                    {fileAiResult.questions.map((qa, i) => (
+                      <View key={i} style={{ marginBottom: 6 }}>
+                        <Text style={[s.modalText, { fontFamily: 'Tajawal_700Bold' }]}>س: {qa.question}</Text>
+                        <Text style={[s.modalText, { color: colors.muted }]}>ج: {qa.answer}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+                {fileAiResult.tags.length > 0 && (
+                  <View>
+                    <Text style={[s.modalTitle, { fontSize: 13, marginBottom: 4 }]}>كلمات مفتاحية</Text>
+                    <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                      {fileAiResult.tags.map(t => (
+                        <View key={t} style={s.tag}><Text style={s.tagText}>{t}</Text></View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+              </ScrollView>
+            ) : null}
+            {fileAiResult && (
+              <TouchableOpacity style={s.modalAction} onPress={addFileResultToLecture}>
+                <Ionicons name="add-circle" size={18} color="#fff" />
+                <Text style={s.modalActionText}>إضافة النتائج إلى المحاضرة</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      </Modal>
 
       {/* Image Analysis Modal */}
       <Modal visible={analysisModal} transparent animationType="slide">
@@ -816,4 +1094,44 @@ const styles = (c: ReturnType<typeof useColors>) => StyleSheet.create({
     padding: 12, justifyContent: 'center',
   },
   modalActionText: { fontFamily: 'Tajawal_700Bold', fontSize: 14, color: '#fff' },
+
+  // ── Files ──────────────────────────────────────────────────────────
+  fileUploadBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    padding: 12, backgroundColor: c.surface,
+    borderBottomWidth: 1, borderBottomColor: c.border,
+  },
+  fileUploadBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: c.primary, borderRadius: 10,
+    paddingHorizontal: 14, paddingVertical: 9,
+  },
+  fileUploadBtnText: { fontFamily: 'Tajawal_700Bold', fontSize: 13, color: '#fff' },
+  fileUploadHint: { flex: 1, fontFamily: 'Tajawal_400Regular', fontSize: 12, color: c.muted },
+  fileEmptyState: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, padding: 40,
+  },
+  fileEmptyTitle: { fontFamily: 'Tajawal_700Bold', fontSize: 16, color: c.foreground },
+  fileEmptyHint: {
+    fontFamily: 'Tajawal_400Regular', fontSize: 13, color: c.muted,
+    textAlign: 'center', lineHeight: 20,
+  },
+  fileCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: c.card, borderRadius: 14, padding: 12,
+    borderWidth: 1, borderColor: c.border,
+  },
+  fileIconBox: {
+    width: 48, height: 48, borderRadius: 12,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  fileInfo: { flex: 1, gap: 3 },
+  fileName: { fontFamily: 'Tajawal_700Bold', fontSize: 14, color: c.foreground },
+  fileMeta: { fontFamily: 'Tajawal_400Regular', fontSize: 12, color: c.muted },
+  fileActions: { flexDirection: 'row', gap: 6, alignItems: 'center' },
+  fileActionBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6,
+  },
+  fileActionText: { fontFamily: 'Tajawal_500Medium', fontSize: 12 },
 });

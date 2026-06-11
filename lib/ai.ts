@@ -170,3 +170,63 @@ export async function analyzeWhiteboardImage(imageBase64: string): Promise<strin
     `هذه صورة سبورة من محاضرة جامعية. 1. استخرج كل النص المكتوب 2. صف أي معادلات أو رسومات 3. لخّص المحتوى بإيجاز. الرد باللغة العربية.`
   );
 }
+
+export async function analyzeDocument(textContent: string, fileName: string): Promise<{
+  summary: string;
+  keyPoints: string[];
+  questions: QuestionAnswer[];
+  tags: string[];
+}> {
+  const truncated = textContent.slice(0, 5000);
+  const raw = await callAI(
+    `حلّل محتوى الملف "${fileName}" وأعطني:
+
+1. ملخص: (3-5 جمل)
+2. نقاط رئيسية: (اكتب كل نقطة في سطر يبدأ بـ "- ")
+3. أسئلة: (كل سؤال يبدأ بـ "س: " وإجابته في السطر التالي تبدأ بـ "ج: ")
+4. كلمات مفتاحية: (مفصولة بفاصلة)
+
+محتوى الملف:
+${truncated}`,
+    SYSTEM
+  );
+
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  let summary = '';
+  const kp: string[] = [];
+  const qs: QuestionAnswer[] = [];
+  let tags: string[] = [];
+  let section = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.includes('ملخص')) { section = 'summary'; continue; }
+    if (l.includes('نقاط رئيسية') || l.includes('نقاط')) { section = 'kp'; continue; }
+    if (l.includes('أسئلة')) { section = 'q'; continue; }
+    if (l.includes('كلمات مفتاحية') || l.includes('مفتاحية')) { section = 'tags'; continue; }
+
+    if (section === 'summary' && !summary) summary = l;
+    else if (section === 'summary' && !l.startsWith('-') && !l.match(/^\d/)) summary += ' ' + l;
+    else if (section === 'kp' && l.startsWith('-')) kp.push(l.replace(/^-\s*/, ''));
+    else if (section === 'q' && l.startsWith('س:') && lines[i+1]?.startsWith('ج:')) {
+      qs.push({ question: l.replace(/^س:\s*/, ''), answer: lines[i+1].replace(/^ج:\s*/, '') });
+      i++;
+    } else if (section === 'tags') {
+      tags = l.split(/[،,]/).map(t => t.trim()).filter(Boolean);
+    }
+  }
+
+  return {
+    summary: summary || raw.slice(0, 200),
+    keyPoints: kp.slice(0, 8),
+    questions: qs.slice(0, 5),
+    tags: tags.slice(0, 6),
+  };
+}
+
+export async function analyzeImageAttachment(imageBase64: string, mimeType: string): Promise<string> {
+  return callVisionAI(
+    imageBase64,
+    `هذه صورة/مستند من محاضرة جامعية. استخرج جميع المعلومات والنصوص الموجودة فيها بالتفصيل. الرد باللغة العربية.`
+  );
+}
