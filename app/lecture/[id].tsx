@@ -87,6 +87,7 @@ export default function LectureScreen() {
   const [fileAiResult, setFileAiResult] = useState<{
     summary: string; keyPoints: string[]; questions: QuestionAnswer[]; tags: string[];
   } | null>(null);
+  const [fileViewerModal, setFileViewerModal] = useState<LectureAttachment | null>(null);
 
   useEffect(() => {
     if (id) getLecture(id).then(l => { setLecture(l); setLoading(false); });
@@ -364,6 +365,21 @@ export default function LectureScreen() {
       setFileAiResult({ summary: 'تعذّر تحليل الملف. تحقق من الاتصال وحاول مرة أخرى.', keyPoints: [], questions: [], tags: [] });
     } finally {
       setFileAiLoading(false);
+    }
+  };
+
+  const openFileViewer = (att: LectureAttachment) => {
+    if (Platform.OS === 'web') {
+      if (att.mimeType.startsWith('image/') || att.mimeType === 'application/pdf' || att.mimeType.startsWith('text/')) {
+        setFileViewerModal(att);
+      } else {
+        const a = document.createElement('a');
+        a.href = att.uri;
+        a.download = att.name;
+        a.click();
+      }
+    } else {
+      Alert.alert('عرض الملف', 'عرض الملفات متاح على المتصفح');
     }
   };
 
@@ -809,6 +825,13 @@ export default function LectureScreen() {
                     </View>
                     <View style={s.fileActions}>
                       <TouchableOpacity
+                        style={[s.fileActionBtn, { backgroundColor: colors.accent + '18' }]}
+                        onPress={() => openFileViewer(att)}
+                      >
+                        <Ionicons name="eye-outline" size={15} color={colors.accent} />
+                        <Text style={[s.fileActionText, { color: colors.accent }]}>عرض</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
                         style={[s.fileActionBtn, { backgroundColor: colors.primary + '18' }]}
                         onPress={() => openFileAnalysis(att)}
                       >
@@ -894,6 +917,64 @@ export default function LectureScreen() {
                 <Text style={s.modalActionText}>إضافة النتائج إلى المحاضرة</Text>
               </TouchableOpacity>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* File Viewer Modal */}
+      <Modal visible={!!fileViewerModal} transparent animationType="fade">
+        <View style={[s.modalOverlay, { justifyContent: 'center', padding: 16 }]}>
+          <View style={[s.modalSheet, { borderRadius: 18, maxHeight: '90%' }]}>
+            <View style={s.modalHeader}>
+              <Text style={s.modalTitle} numberOfLines={1}>{fileViewerModal?.name}</Text>
+              <TouchableOpacity onPress={() => setFileViewerModal(null)}>
+                <Ionicons name="close" size={22} color={colors.foreground} />
+              </TouchableOpacity>
+            </View>
+
+            {fileViewerModal?.mimeType.startsWith('image/') ? (
+              <ScrollView style={{ maxHeight: 460 }} contentContainerStyle={{ alignItems: 'center', padding: 8 }}>
+                <Image
+                  source={{ uri: fileViewerModal.uri }}
+                  style={{ width: '100%', height: 420, borderRadius: 10 }}
+                  resizeMode="contain"
+                />
+              </ScrollView>
+            ) : fileViewerModal?.mimeType === 'application/pdf' ? (
+              <View style={{ height: 460, borderRadius: 10, overflow: 'hidden' }}>
+                {Platform.OS === 'web' && (
+                  <iframe
+                    src={fileViewerModal.uri}
+                    style={{ width: '100%', height: '100%', border: 'none', borderRadius: 10 }}
+                    title={fileViewerModal.name}
+                  />
+                )}
+              </View>
+            ) : fileViewerModal?.textContent ? (
+              <ScrollView style={{ maxHeight: 400 }} contentContainerStyle={{ padding: 4 }}>
+                <Text style={s.modalText}>{fileViewerModal.textContent}</Text>
+              </ScrollView>
+            ) : (
+              <View style={{ alignItems: 'center', padding: 30, gap: 10 }}>
+                <Ionicons name="document-outline" size={48} color={colors.muted} />
+                <Text style={s.modalHint}>لا يمكن عرض هذا النوع من الملفات مباشرة</Text>
+              </View>
+            )}
+
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {fileViewerModal && (
+                <TouchableOpacity
+                  style={[s.modalAction, { flex: 1, backgroundColor: colors.primary }]}
+                  onPress={() => {
+                    setFileViewerModal(null);
+                    if (fileViewerModal) openFileAnalysis(fileViewerModal);
+                  }}
+                >
+                  <Ionicons name="sparkles" size={16} color="#fff" />
+                  <Text style={s.modalActionText}>تحليل بالذكاء</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           </View>
         </View>
       </Modal>

@@ -1,6 +1,38 @@
 import { QuestionAnswer } from './storage';
 
 const getOpenRouterKey = () => (process.env.EXPO_PUBLIC_OPENROUTER_KEY ?? '').trim();
+const getOpenAIKey = () => (
+  process.env.EXPO_PUBLIC_OPENAI_API_KEY ||
+  process.env.OPENAI_API_KEY ||
+  ''
+).trim();
+
+// ── OpenAI — highest priority when key is present ────────────────────
+const OAI_MODELS = ['gpt-4o-mini', 'gpt-3.5-turbo'];
+const OAI_VISION_MODELS = ['gpt-4o-mini', 'gpt-4o'];
+
+async function callOpenAI(messages: { role: string; content: any }[], vision = false): Promise<string> {
+  const key = getOpenAIKey();
+  if (!key) throw new Error('no_oai_key');
+  const models = vision ? OAI_VISION_MODELS : OAI_MODELS;
+  for (const model of models) {
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ model, messages, max_tokens: 2000, temperature: 0.7 }),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const text = data.choices?.[0]?.message?.content;
+      if (text?.trim()) return text.trim();
+    } catch { continue; }
+  }
+  throw new Error('openai_failed');
+}
 
 // ── Pollinations.ai — completely free, no API key needed ──────────────
 const POLLINATIONS_URL = 'https://text.pollinations.ai/openai';
@@ -65,31 +97,37 @@ async function callOpenRouter(messages: { role: string; content: any }[], vision
   throw new Error('openrouter_failed');
 }
 
-// ── Unified text call: try OpenRouter first, fallback to Pollinations ─
+// ── Unified text call: OpenAI → OpenRouter → Pollinations ─────────────
 async function callAI(prompt: string, systemPrompt?: string): Promise<string> {
   const messages = [
     ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
     { role: 'user', content: prompt },
   ];
-  const key = getOpenRouterKey();
-  if (key) {
+  if (getOpenAIKey()) {
+    try { return await callOpenAI(messages); } catch { /* fallback */ }
+  }
+  const orKey = getOpenRouterKey();
+  if (orKey) {
     try { return await callOpenRouter(messages); } catch { /* fallback */ }
   }
   return callPollinations(messages);
 }
 
-// ── Vision call: try OpenRouter first, fallback to Pollinations vision ─
+// ── Vision call: OpenAI → OpenRouter → Pollinations ───────────────────
 async function callVisionAI(imageBase64: string, prompt: string): Promise<string> {
   const imageContent = [
     { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${imageBase64}` } },
     { type: 'text', text: prompt },
   ];
   const messages = [{ role: 'user', content: imageContent }];
-  const key = getOpenRouterKey();
-  if (key) {
+  if (getOpenAIKey()) {
+    try { return await callOpenAI(messages, true); } catch { /* fallback */ }
+  }
+  const orKey = getOpenRouterKey();
+  if (orKey) {
     try { return await callOpenRouter(messages, true); } catch { /* fallback */ }
   }
-  try { return await callPollinations(messages); } catch { /* fallback */ }
+  try { return await callPollinations(messages); } catch { }
   throw new Error('فشل تحليل الصورة. حاول مرة أخرى.');
 }
 
@@ -99,8 +137,8 @@ const SYSTEM = `أنت مساعد دراسي ذكي متخصص في تلخيص �
 كن مختصراً ومفيداً.`;
 
 export const AI_PROVIDER_INFO = {
-  hasKey: () => !!getOpenRouterKey(),
-  label: () => getOpenRouterKey() ? 'OpenRouter (مفتاح مخصص)' : 'Pollinations AI (مجاني)',
+  hasKey: () => !!(getOpenAIKey() || getOpenRouterKey()),
+  label: () => getOpenAIKey() ? 'OpenAI (مفتاح مخصص)' : getOpenRouterKey() ? 'OpenRouter (مفتاح مخصص)' : 'Pollinations AI (مجاني)',
 };
 
 export async function summarizeLecture(text: string): Promise<string> {

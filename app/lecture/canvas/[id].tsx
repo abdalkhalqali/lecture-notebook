@@ -762,7 +762,6 @@ export default function CanvasScreen() {
       <View
         style={[s.canvas, { height: canvasH, backgroundColor: activeBg }]}
         {...panResponder.panHandlers}
-        onStartShouldSetResponder={() => false}
       >
         <Svg
           style={StyleSheet.absoluteFill}
